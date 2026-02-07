@@ -1,0 +1,2 @@
+# adprincipalcertificate
+ADPrincipalCertificate PowerShell Module
