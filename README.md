@@ -2,7 +2,7 @@
 
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1+-blue)](https://docs.microsoft.com/en-us/powershell/)
 [![License](https://img.shields.io/badge/License-MIT-green)](https://github.com/richardhicks/adprincipalcertificate/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.0-blue)](https://github.com/richardhicks/adprincipalcertificate)
+[![Version](https://img.shields.io/badge/Version-1.1-blue)](https://github.com/richardhicks/adprincipalcertificate)
 
 A PowerShell module for managing and reporting on certificates attached to Active Directory principals (users, computers, and service accounts).
 
@@ -424,3 +424,4 @@ Richard M. Hicks Consulting, Inc.
 ## License
 
 This project is provided as-is without warranty. Please test thoroughly in a non-production environment before use.
+
