@@ -62,6 +62,7 @@ Import-Module ADPrincipalCertificate
 |----------|-------------|
 | `Show-ADPrincipalCertificate` | Enumerates AD principals that have certificates attached |
 | `Get-ADPrincipalCertificate` | Retrieves and displays detailed certificate information for AD principals |
+| `Add-ADPrincipalCertificate` | Adds certificates to AD principals from certificate files |
 | `Remove-ADPrincipalCertificate` | Removes certificates from AD principals |
 | `Find-CertificateTemplateWithPublishInAD` | Finds certificate templates with "Publish in Active Directory" enabled |
 
@@ -228,6 +229,59 @@ Get-ADPrincipalCertificate -Identity 'jsmith' -ExcludeSelfSignedCertificate
 # Find expired CA-issued certificates only
 Get-ADUser -Filter * | Get-ADPrincipalCertificate -ExcludeSelfSignedCertificate |
     Where-Object { $_.Expires -lt (Get-Date) }
+```
+
+### Add-ADPrincipalCertificate
+
+Adds certificates from file(s) to the `userCertificate` attribute of AD principals. Supports DER-encoded (.cer, .crt, .der) and PEM/Base64-encoded (.pem, .crt) certificate files.
+
+#### Basic Usage
+
+```powershell
+# Add a certificate to a user
+Add-ADPrincipalCertificate -Identity 'jsmith' -Certificate 'C:\Certs\user.cer'
+
+# Add multiple certificates to a user
+Add-ADPrincipalCertificate -Identity 'jsmith' -Certificate 'cert1.cer', 'cert2.cer'
+
+# Add a certificate to multiple principals
+Add-ADPrincipalCertificate -Identity 'jsmith', 'jdoe' -Certificate 'C:\Certs\shared.cer'
+```
+
+#### Pipeline Input from AD Cmdlets
+
+```powershell
+# Pipe a user object and add a certificate
+Get-ADUser -Identity 'jsmith' | Add-ADPrincipalCertificate -Certificate 'C:\Certs\user.cer'
+
+# Pipe a computer object and add a certificate
+Get-ADComputer -Identity 'YOURPC01' | Add-ADPrincipalCertificate -Certificate 'C:\Certs\computer.cer'
+
+# Pipe a service account and add a certificate
+Get-ADServiceAccount -Identity 'svc_webapp' | Add-ADPrincipalCertificate -Certificate 'C:\Certs\svc.cer'
+
+# Add a certificate to all users in a department
+Get-ADUser -Filter {Department -eq 'Human Resources'} | Add-ADPrincipalCertificate -Certificate 'C:\Certs\hr.cer'
+```
+
+#### Piping Certificate File Paths
+
+```powershell
+# Pipe certificate file paths to add multiple certificates to a user
+'cert1.cer', 'cert2.cer' | Add-ADPrincipalCertificate -Identity 'jsmith'
+
+# Read certificate file paths from a text file (one per line)
+Get-Content -Path .\certs.txt | Add-ADPrincipalCertificate -Identity 'jsmith'
+
+# Pipe certificate files using Get-ChildItem
+(Get-ChildItem -Path C:\Certs\*.cer).FullName | Add-ADPrincipalCertificate -Identity 'jsmith'
+```
+
+#### Using WhatIf
+
+```powershell
+# Preview what would happen without making changes
+Add-ADPrincipalCertificate -Identity 'YOURPC01' -Certificate 'C:\Certs\computer.cer' -WhatIf
 ```
 
 ### Remove-ADPrincipalCertificate

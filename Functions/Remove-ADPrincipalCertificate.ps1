@@ -4,7 +4,7 @@
     Remove certificates from an Active Directory principal's userCertificate attribute.
 
 .DESCRIPTION
-    This function removes certificates from the userCertificate attribute of AD principals (users, computers, service accounts, or other AD objects). By default, self-signed (non-managed) certificates are preserved and only managed certificates are removed. Use the -IncludeSelfSignedCertificate switch to also remove self-signed certificates. This is a destructive operation that permanently deletes certificate data from Active Directory. The script accepts pipeline input from Get-ADUser, Get-ADComputer, Get-ADServiceAccount, or Get-ADObject cmdlets.
+    This function removes certificates from the userCertificate attribute of AD principals (users, computers, service accounts, or other AD objects). By default, self-signed (non-managed) certificates are preserved and only managed certificates are removed. Use the -IncludeSelfSignedCertificate switch to also remove self-signed certificates. Use the -SerialNumber parameter to selectively remove specific certificates by their serial number. This is a destructive operation that permanently deletes certificate data from Active Directory. The script accepts pipeline input from Get-ADUser, Get-ADComputer, Get-ADServiceAccount, or Get-ADObject cmdlets.
 
     WARNING: This operation is irreversible without an Active Directory backup. Ensure you have a current AD backup before running this command.
 
@@ -16,6 +16,9 @@
 
 .PARAMETER IncludeSelfSignedCertificate
     When specified, includes self-signed certificates (where Subject equals Issuer) in the removal operation. By default, self-signed certificates are preserved and only managed certificates are removed.
+
+.PARAMETER SerialNumber
+    One or more certificate serial numbers to selectively remove. When specified, only certificates matching the provided serial number(s) are removed, regardless of whether they are self-signed or managed. Serial numbers are compared case-insensitively and common delimiters (spaces, colons, hyphens) are automatically stripped. This parameter accepts multiple values and pipeline input by property name.
 
 .INPUTS
     Microsoft.ActiveDirectory.Management.ADUser, Microsoft.ActiveDirectory.Management.ADComputer, Microsoft.ActiveDirectory.Management.ADServiceAccount, Microsoft.ActiveDirectory.Management.ADObject, or String values.
@@ -63,6 +66,21 @@
 
     Removes ALL certificates from all computer accounts, including self-signed certificates.
 
+.EXAMPLE
+    Remove-ADPrincipalCertificate -Identity 'juser' -SerialNumber '33000003ddf5acda26d4201bfe0000000003dd'
+
+    Removes only the certificate with serial number 33000003ddf5acda26d4201bfe0000000003dd from user juser.
+
+.EXAMPLE
+    Remove-ADPrincipalCertificate -Identity 'app1' -SerialNumber '7c27a2e649907b9141ccad554efaa2f7', '1f00001cbc007ce9a0c9b27a17000100001cbc' -Force
+
+    Removes certificates matching serial numbers 7c27a2e649907b9141ccad554efaa2f7 and 1f00001cbc007ce9a0c9b27a17000100001cbc from computer app1, bypassing the backup warning.
+
+.EXAMPLE
+    Get-ADUser juser | Remove-ADPrincipalCertificate -SerialNumber '389cf35461ed7688418fb2b8ffeddd2f'
+
+    Pipes a user object and removes only the certificate matching the specified serial number. Delimiters in the serial number are automatically stripped.
+
 .LINK
     https://github.com/richardhicks/adprincipalcertificate/blob/main/Functions/Remove-ADPrincipalCertificate.ps1
 
@@ -70,9 +88,9 @@
     https://www.richardhicks.com/
 
 .NOTES
-    Version:        1.0
+    Version:        1.1
     Creation Date:  February 7, 2026
-    Last Updated:   February 7, 2026
+    Last Updated:   February 9, 2026
     Author:         Richard Hicks
     Organization:   Richard M. Hicks Consulting, Inc.
     Contact:        rich@richardhicks.com
@@ -99,7 +117,11 @@ Function Remove-ADPrincipalCertificate {
         [switch]$Force,
 
         [Parameter(HelpMessage = 'Include self-signed certificates in the removal')]
-        [switch]$IncludeSelfSignedCertificate
+        [switch]$IncludeSelfSignedCertificate,
+
+        [Parameter(ValueFromPipelineByPropertyName, HelpMessage = 'Specify one or more certificate serial numbers to remove')]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$SerialNumber
 
     )
 
@@ -125,7 +147,13 @@ Function Remove-ADPrincipalCertificate {
 
             Write-Warning '*** CRITICAL OPERATION ***'
 
-            If ($IncludeSelfSignedCertificate) {
+            If ($SerialNumber) {
+
+                Write-Warning 'This operation will permanently remove certificates matching the specified serial number(s) from the specified AD principal(s).'
+
+            }
+
+            ElseIf ($IncludeSelfSignedCertificate) {
 
                 Write-Warning 'This operation will permanently remove ALL certificates from the specified AD principal(s).'
                 Write-Warning 'This includes self-signed certificates.'
@@ -371,10 +399,21 @@ Function Remove-ADPrincipalCertificate {
                 $TotalCertificates = $CertificateList.Count
                 Write-Verbose "Processing $TotalCertificates certificate(s) for $($Principal.SamAccountName)."
 
-                # Separate non-managed certificates (self-signed) from managed certificates
+                # Normalize serial numbers for comparison if specified
+                $NormalizedSerialNumbers = $null
+
+                If ($SerialNumber) {
+
+                    $NormalizedSerialNumbers = @($SerialNumber | ForEach-Object { ($_ -replace '[\s:\-]', '').ToUpper() })
+                    Write-Verbose "Filtering by serial number(s): $($NormalizedSerialNumbers -join ', ')"
+
+                }
+
+                # Separate certificates based on filtering criteria
                 # Use Generic List for better performance with large datasets
                 $CertificatesToRemove = [System.Collections.Generic.List[byte[]]]::new()
-                $SelfSignedCount = 0
+                $PreservedCount = 0
+                $MatchedSerials = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
                 # Use for loop with explicit indexing to prevent byte array unrolling
                 For ($i = 0; $i -lt $CertificateList.Count; $i++) {
@@ -386,22 +425,23 @@ Function Remove-ADPrincipalCertificate {
 
                         $Certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($CertBytes)
 
-                        # Check if certificate is self-signed (Subject equals Issuer)
-                        If ($Certificate.Subject -eq $Certificate.Issuer) {
+                        If ($NormalizedSerialNumbers) {
 
-                            # If IncludeSelfSignedCertificate is specified, include self-signed certificates in removal
-                            If ($IncludeSelfSignedCertificate) {
+                            # Serial number filtering mode
+                            $CertSerial = $Certificate.SerialNumber.ToUpper()
+
+                            If ($CertSerial -in $NormalizedSerialNumbers) {
 
                                 $CertificatesToRemove.Add($CertBytes)
-                                Write-Verbose "Marking self-signed certificate for removal: $($Certificate.Subject) (Thumbprint: $($Certificate.Thumbprint))"
+                                [void]$MatchedSerials.Add($CertSerial)
+                                Write-Verbose "Marking certificate for removal (serial number match): $($Certificate.Subject) (Serial: $CertSerial)"
 
                             }
 
                             Else {
 
-                                # By default, preserve self-signed certificates
-                                $SelfSignedCount++
-                                Write-Verbose "Preserving self-signed certificate: $($Certificate.Subject) (Thumbprint: $($Certificate.Thumbprint))"
+                                $PreservedCount++
+                                Write-Verbose "Preserving certificate (serial number not specified for removal): $($Certificate.Subject) (Serial: $CertSerial)"
 
                             }
 
@@ -409,8 +449,34 @@ Function Remove-ADPrincipalCertificate {
 
                         Else {
 
-                            $CertificatesToRemove.Add($CertBytes)
-                            Write-Verbose "Marking managed certificate for removal: $($Certificate.Subject) (Issuer: $($Certificate.Issuer))"
+                            # Default mode: filter by self-signed vs managed
+                            # Check if certificate is self-signed (Subject equals Issuer)
+                            If ($Certificate.Subject -eq $Certificate.Issuer) {
+
+                                # If IncludeSelfSignedCertificate is specified, include self-signed certificates in removal
+                                If ($IncludeSelfSignedCertificate) {
+
+                                    $CertificatesToRemove.Add($CertBytes)
+                                    Write-Verbose "Marking self-signed certificate for removal: $($Certificate.Subject) (Thumbprint: $($Certificate.Thumbprint))"
+
+                                }
+
+                                Else {
+
+                                    # By default, preserve self-signed certificates
+                                    $PreservedCount++
+                                    Write-Verbose "Preserving self-signed certificate: $($Certificate.Subject) (Thumbprint: $($Certificate.Thumbprint))"
+
+                                }
+
+                            }
+
+                            Else {
+
+                                $CertificatesToRemove.Add($CertBytes)
+                                Write-Verbose "Marking managed certificate for removal: $($Certificate.Subject) (Issuer: $($Certificate.Issuer))"
+
+                            }
 
                         }
 
@@ -419,7 +485,7 @@ Function Remove-ADPrincipalCertificate {
                     Catch {
 
                         Write-Warning "Unable to parse certificate for '$($Principal.SamAccountName)'. Skipping certificate to be safe: $_"
-                        $SelfSignedCount++
+                        $PreservedCount++
 
                     }
 
@@ -436,10 +502,29 @@ Function Remove-ADPrincipalCertificate {
 
                 }
 
+                # Warn about serial numbers that were not found
+                If ($NormalizedSerialNumbers) {
+
+                    $UnmatchedSerials = $NormalizedSerialNumbers | Where-Object { -not $MatchedSerials.Contains($_) }
+
+                    ForEach ($Unmatched in $UnmatchedSerials) {
+
+                        Write-Warning "Certificate with serial number '$Unmatched' was not found on principal '$($Principal.SamAccountName)'."
+
+                    }
+
+                }
+
                 # Check if there are any certificates to remove
                 If ($CertificatesToRemove.Count -eq 0) {
 
-                    If (-not $IncludeSelfSignedCertificate) {
+                    If ($NormalizedSerialNumbers) {
+
+                        Write-Warning "No certificates matching the specified serial number(s) were found for principal `"$($Principal.SamAccountName)`"."
+
+                    }
+
+                    ElseIf (-not $IncludeSelfSignedCertificate) {
 
                         Write-Warning "No certificates matching the specified criteria were found for principal `"$($Principal.SamAccountName)`"."
 
@@ -456,12 +541,19 @@ Function Remove-ADPrincipalCertificate {
                 }
 
                 $RemoveCount = $CertificatesToRemove.Count
-                $PreserveCount = $SelfSignedCount
+                $PreserveCount = $PreservedCount
 
-                Write-Verbose "Certificates to remove: $RemoveCount | Self-signed certificates to preserve: $PreserveCount"
+                Write-Verbose "Certificates to remove: $RemoveCount | Certificates to preserve: $PreserveCount"
 
                 # Perform the removal with ShouldProcess support
-                If (-not $IncludeSelfSignedCertificate -and $PreserveCount -gt 0) {
+                If ($NormalizedSerialNumbers) {
+
+                    $ConfirmMessage = "Remove $RemoveCount certificate(s) matching specified serial number(s) from '$($Principal.SamAccountName)' ($($Principal.ObjectClass))? ($PreserveCount certificate(s) will be preserved)"
+                    $WhatIfMessage = "Removing $RemoveCount certificate(s) matching specified serial number(s) from '$($Principal.SamAccountName)' ($($Principal.ObjectClass)). Preserving $PreserveCount certificate(s)"
+
+                }
+
+                ElseIf (-not $IncludeSelfSignedCertificate -and $PreserveCount -gt 0) {
 
                     $ConfirmMessage = "Remove $RemoveCount managed certificate(s) from '$($Principal.SamAccountName)' ($($Principal.ObjectClass))? ($PreserveCount self-signed certificate(s) will be preserved)"
                     $WhatIfMessage = "Removing $RemoveCount managed certificate(s) from '$($Principal.SamAccountName)' ($($Principal.ObjectClass)). Preserving $PreserveCount self-signed certificate(s)"
@@ -487,7 +579,13 @@ Function Remove-ADPrincipalCertificate {
                         Write-Verbose "Successfully removed $RemoveCount certificate(s) from '$($Principal.SamAccountName)'."
 
                         # Output success message
-                        If ($PreserveCount -gt 0) {
+                        If ($NormalizedSerialNumbers) {
+
+                            Write-Output "Removed $RemoveCount certificate(s) matching specified serial number(s) from '$($Principal.SamAccountName)'. Preserved $PreserveCount certificate(s)."
+
+                        }
+
+                        ElseIf ($PreserveCount -gt 0) {
 
                             Write-Output "Removed $RemoveCount certificate(s) from '$($Principal.SamAccountName)'. Preserved $PreserveCount self-signed certificate(s)."
 
@@ -542,8 +640,8 @@ Function Remove-ADPrincipalCertificate {
 # SIG # Begin signature block
 # MIIf2wYJKoZIhvcNAQcCoIIfzDCCH8gCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB3h77jHMu+X36M
-# m3mreCTF3YSfN8emEyLuxWemiLDERKCCGpkwggNZMIIC36ADAgECAhAPuKdAuRWN
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDz5Dt4ycf/R7bw
+# MCQRObqkOZ/8zhFgilPS5G8nWlfByaCCGpkwggNZMIIC36ADAgECAhAPuKdAuRWN
 # A1FDvFnZ8EApMAoGCCqGSM49BAMDMGExCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxE
 # aWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xIDAeBgNVBAMT
 # F0RpZ2lDZXJ0IEdsb2JhbCBSb290IEczMB4XDTIxMDQyOTAwMDAwMFoXDTM2MDQy
@@ -690,24 +788,24 @@ Function Remove-ADPrincipalCertificate {
 # YWwgRzMgQ29kZSBTaWduaW5nIEVDQyBTSEEzODQgMjAyMSBDQTECEA1KNNqGkI/A
 # Eyy8gTeTryQwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgk54zV9m58M+ArqiKl3CMTaB1
-# NaqgdAApqgDtDYioc+cwCwYHKoZIzj0CAQUABEgwRgIhANjyHtN+SHL0KnemjrFR
-# mD77mfhGVRUVeiQ+n0Y+LR2BAiEAjIZdADMpCSbDrGnXb9HX4mNg/RTLjENFtmHs
-# Gi1l1PChggMmMIIDIgYJKoZIhvcNAQkGMYIDEzCCAw8CAQEwfTBpMQswCQYDVQQG
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgxaTrRj0niE4CeQwaMggPiNJ9
+# L0IAhBTbAIukMhZ8pnAwCwYHKoZIzj0CAQUABEgwRgIhAL5NCscxh2PocvVqCzr7
+# 2EjYVPk0ZjlL6zK7aHo4dZnkAiEAp6FcCEQG0hbOmjwtIyWkVnYl6h5TGTzqLSsT
+# mim1mhShggMmMIIDIgYJKoZIhvcNAQkGMYIDEzCCAw8CAQEwfTBpMQswCQYDVQQG
 # EwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0
 # IFRydXN0ZWQgRzQgVGltZVN0YW1waW5nIFJTQTQwOTYgU0hBMjU2IDIwMjUgQ0Ex
 # AhAKgO8YS43xBYLRxHanlXRoMA0GCWCGSAFlAwQCAQUAoGkwGAYJKoZIhvcNAQkD
-# MQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjYwMjA3MjEzNTUwWjAvBgkq
-# hkiG9w0BCQQxIgQgpLXfUOUpz/CWmyQq8Tsr+p1NkWseDx6pXkavvUGxDSowDQYJ
-# KoZIhvcNAQEBBQAEggIAGFb61p6z5gSSzBwEPL8EBs15n72/DO+i6L9SWW1g/GEG
-# zetVAvLfqjVlJFUeA9QRbPsqRiFu+Gcjt7zNHR3RIMx+2wrXZr1kYwNw/wmt46qn
-# 6JgyM79/XUgyjbPAiZu3a8lCPPEVLVHBxMacE44EObw05sqiUc/C3GO80fxCfAOm
-# evhQhn+eTmgvaHjgSG31DqT1On8fZzByvMLxOmHf7QIsK+a5Ytz+4d5WjBGgtwBJ
-# swfXdGpcmwCiqHdLQ4tFruqDcSmas7gUkKBwpgSdcFpZDh0v+oslzcW6P/4NseeT
-# k+TwTEruCTIpjcJ1y+Vk25YnRyBrKtopjWvfCRtJl7xEDe3Cv4PX6hM6zStHLWr9
-# bC2v0aTZEcJYeY/UHcZE6KRgWLXcaj13zAQl6VuVEeLO0gTMO8NaBQNo6jclIhIg
-# X+kOxPp579pUp6dCTdporfNOJbtMPiTu8GdsrE2LYi1ssarTqNdDJ2oGntl5xFmm
-# uwrYqYfDXo1Eq5cuTbzxyMDXGJV4we/qW3c/7mwhUB6/vUHXKh/wgaNVB4GpRMDr
-# mH/hJZFonjdoCrApS0chOWrHUjrI02rc2PxEupkMoJxzB2i2Xrlp4SnuKPqfRWzR
-# dDk0dDqNJ3n6frYChr8b4VUtURpWNPepPur4Z4Em48CAw02OW6cui5f6g0RNWtA=
+# MQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjYwMjA5MjM0NDA3WjAvBgkq
+# hkiG9w0BCQQxIgQgCqzymaBpmYHHUCwdMEZHtnNA9OLly6AON9jDZPae+oEwDQYJ
+# KoZIhvcNAQEBBQAEggIAtjczrT3BO4K8vhqDCj2XUW1G4E9S2a/DtETAXPj90BTL
+# aInWSbXoRAzYK1bBoVSr5BKAAdlYUzov5XJByy+3pIWCLUPUBeNeMhny3nsDSFxL
+# 1FH0mraL7tj8kENbTFG48PQbG2BMogMIaY3MXPpVIDFjE5UyZA5cKpiTfi7AjpeC
+# bnDJSjbU36DE9WM5TXPiwW4GMW7EQzAi33euiuN1nrS2KXYS+DW6jbGoYqkbqNpY
+# is2kRMabCA1Z7KlMRWNKybvrhBNgT6M6rEpI1K05EL0VsOsVgPsaSeohvGn2TVEE
+# qytGFZymfleomKp6V0yaieFM9Q96zNShfw42H517NtGudC573MFakxoqq8ollPg7
+# y+eCN0YKGvZiz7tpE50SXayuHjOpKM8Y0794bzQAkTZAzKYG85i8VrjJdkZf4KeP
+# xVd9ErmWq57W2IMw3WuS0VpBVaYdj6IBjOnKzzXqRYNR1q2X8W/U9HB0FpnsihUU
+# ro+lC+9MKuVZYTqCizTZWB3VescNq3qy/sPUqOezq9T7hLtpcMHzfAAdEWUNPbSA
+# L9A1J69wi0jFwU16pD7bc/weX/R275RcgQ37YFcf3+9yfxG45mpOfq5fmEMthOCU
+# DHRnP/uvvVz0lLX1gelsf7Ded3U8q09tZTlIrWpaFZN7O06/eiWpj11wcCsSWT0=
 # SIG # End signature block
